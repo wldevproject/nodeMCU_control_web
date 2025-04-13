@@ -41,35 +41,109 @@ void setup() {
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
 
+  WiFiManager wifiManager;
+
   Serial.begin(115200);
+  LittleFS.begin();
+
+  String ssidFromFile = "";
+  String passFromFile = "";
+
+  // Baca SSID dan password tersimpan dari LittleFS
+  if (LittleFS.exists("/wifi.json")) {
+    File file = LittleFS.open("/wifi.json", "r");
+    if (file) {
+      DynamicJsonDocument doc(256);
+      if (deserializeJson(doc, file) == DeserializationError::Ok) {
+        ssidFromFile = doc["ssid"].as<String>();
+        passFromFile = doc["pass"].as<String>();
+      }
+      file.close();
+    }
+  }
 
   WiFi.mode(WIFI_STA);  // Mulai dalam mode station
   WiFi.config(local_IP, gateway, subnet);
-  WiFi.begin(primarySSID, primaryPASS);
-  Serial.println("Mencoba konek ke WiFi...");
+  // WiFi.begin(primarySSID, primaryPASS);
+  // Serial.println("Mencoba konek ke WiFi...");
 
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
-    delay(500);
-    Serial.print(".");
-  }
+  // Kalau SSID tersimpan ada, coba konek langsung
+  if (ssidFromFile != "") {
+    WiFi.begin(ssidFromFile.c_str(), passFromFile.c_str());
+    Serial.println("Mencoba konek ke SSID tersimpan...");
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nTerhubung ke WiFi!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nTerhubung ke WiFi!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+   } else {
+      Serial.println("\nGagal konek, mengaktifkan AP mode...");
+      WiFi.mode(WIFI_AP);
+      WiFi.softAP(ssid, password);
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.softAPIP());
+    }
   } else {
-    Serial.println("\nGagal konek, mengaktifkan AP mode...");
-    WiFi.mode(WIFI_AP);  // Ganti ke mode AP
-    WiFi.softAP(ssid, password);
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.softAPIP());
+    // Kalau belum ada data, masuk WiFiManager
+    if (!wifiManager.autoConnect("ESP-KENDALI", "12345678")) {
+      Serial.println("Gagal connect. Restart...");
+      delay(3000);
+      ESP.restart();
+    }
   }
 
+  // Form WiFi
+  server.on("/wifi", []() {
+    String html = R"rawliteral(
+      <!DOCTYPE html>
+      <html><head><title>WiFi Setup</title></head>
+      <body>
+        <h1>Setup WiFi</h1>
+        <form action="/save-ssid" method="POST">
+          <input type="text" name="ssid" placeholder="SSID WiFi" required><br>
+          <input type="password" name="password" placeholder="Password WiFi" required><br>
+          <button type="submit">Simpan & Hubungkan</button>
+        </form>
+      </body>
+      </html>
+    )rawliteral";
+    server.send(200, "text/html", html);
+  });
+
+  // Simpan SSID dan password, lalu restart ESP
+  server.on("/save-ssid", HTTP_POST, []() {
+    String newSSID = server.arg("ssid");
+    String newPASS = server.arg("password");
+
+    DynamicJsonDocument doc(256);
+    doc["ssid"] = newSSID;
+    doc["pass"] = newPASS;
+
+    File file = LittleFS.open("/wifi.json", "w");
+    if (file) {
+      serializeJson(doc, file);
+      file.close();
+    }
+
+    String html = "<h2>Berhasil disimpan! Restarting...</h2>";
+    server.send(200, "text/html", html);
+    delay(2000);
+    ESP.restart();
+  });
+
+  // Halaman kontrol
   server.on("/", []() {
     server.send(200, "text/html", htmlPage);
   });
 
+
+  // Endpoint untuk kendali motor
   server.on("/move", []() {
     String dir = server.arg("dir");
     int spd = server.hasArg("spd") ? server.arg("spd").toInt() : 0;
@@ -87,7 +161,7 @@ void setup() {
   });
 
   server.begin();
-  Serial.println("Server dimulai. Gunakan browser atau Serial Monitor.");
+  Serial.println("Server dimulai di IP: " + WiFi.localIP().toString());
 }
 
 void loop() {
@@ -185,6 +259,8 @@ const char* htmlPage = R"rawliteral(
 <body>
   <h1>Gunakan Keyboard: W A S D untuk gerak, Q untuk stop</h1>
   <p>Tekan dan tahan untuk mempercepat!</p>
+  <h3 style="color:green;">Terhubung ke IP: <span id="ip"></span></h3>
+
   <script>
     let speed = 0;
     const maxSpeed = 1023;
@@ -196,6 +272,8 @@ const char* htmlPage = R"rawliteral(
       const dir = Array.from(keys).sort().join('');
       fetch(`/move?dir=${dir}&spd=${speed}`);
     }
+
+    document.getElementById('ip').innerText = location.hostname;
 
     document.addEventListener("keydown", (e) => {
       const key = e.key.toLowerCase();
